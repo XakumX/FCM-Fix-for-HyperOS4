@@ -4,6 +4,11 @@ plugins {
 
 ext.commitCount = 1
 
+// 所有子项目的构建输出集中到仓库根目录的 build/ 下(与模块目录同级)
+subprojects {
+    layout.buildDirectory = rootProject.layout.buildDirectory.dir(project.name)
+}
+
 tasks.register('clean', Delete) {
     delete rootProject.layout.buildDirectory
 }

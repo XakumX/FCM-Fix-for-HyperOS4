@@ -44,11 +44,11 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
         with:
-          path: HyperFCMLive/build/outputs/apk/release/*.apk
+          path: build/OS4FCMFix/outputs/apk/release/*.apk
           archive: false
 
       - name: Upload debug artifact
         uses: actions/upload-artifact@v7
         with:
-          path: HyperFCMLive/build/outputs/apk/debug/*.apk
+          path: build/OS4FCMFix/outputs/apk/debug/*.apk
           archive: false

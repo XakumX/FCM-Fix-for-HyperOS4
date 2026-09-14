@@ -17,8 +17,8 @@ dependencyResolutionManagement {
         }
     }
 }
-rootProject.name = "HyperFCMLive"
-include ':HyperFCMLive'
+rootProject.name = "OS4FCMFix"
+include ':OS4FCMFix'
 include ':hiddenapi'
 include ':hiddenapi:stubs'
 include ':hiddenapi:bridge'
