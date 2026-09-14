@@ -1,4 +1,4 @@
-package io.github.hyperfcm.a17;
+package com.xakumx.os4.fcmfix;
 
 import android.annotation.SuppressLint;
 import android.content.Context;

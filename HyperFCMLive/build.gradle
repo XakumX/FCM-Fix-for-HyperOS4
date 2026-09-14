@@ -69,7 +69,7 @@ android {
 
     dependenciesInfo.includeInApk false
     enableKotlin = false
-    namespace 'io.github.hyperfcm.a17'
+    namespace 'com.xakumx.os4.fcmfix'
 }
 
 base {
