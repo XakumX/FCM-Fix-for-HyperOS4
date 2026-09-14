@@ -1,10 +1,7 @@
 # FCM-Fix-for-HyperOS4
 
-Remove the limitations to GMS as well as FCM Broadcast from HyperOS4.
-
 移植自 [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live),
-针对 **HyperOS 4 / Android 17** 的 Aurogon / Immobulus 省电体系做了完整适配。
-已在 Redmi K90 Ultra(HyperOS 4.0 开发版,Android 17)实测通过:
+已在 Redmi K90 Ultra(HyperOS 4.0.0.9.XHPCNXM.D01, Android 17)实测通过:
 应用后台策略保持「智能限制」+ 锁屏静置状态下,谷歌推送即时到达。
 
 ## 原理
@@ -43,6 +40,3 @@ powerkeeper: GmsObserver 检测 Google 不可达
 ## 致谢
 
 - [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live)(GPL-3.0):原始模块
-- HyperOS 4 适配(updateGmsNetStatus / AurogonImmobulusMode / checkImmobulusModeRestrict /
-  ListAppsManager static 字段 / NetdExecutor.setGmsDnsBlockerState 等)基于 K90 Ultra
-  ROM 反编译与实测迭代完成
