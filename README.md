@@ -39,4 +39,5 @@ powerkeeper: GmsObserver 检测 Google 不可达
 
 ## 致谢
 
-- [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live)(GPL-3.0):原始模块
+- [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live)：原始模块
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)：Agent
