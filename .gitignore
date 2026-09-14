@@ -23,6 +23,10 @@ misc.xml
 deploymentTargetDropDown.xml
 render.experimental.xml
 
+# Compiled class output (javac default output dirs)
+bin/
+out/
+
 # Keystore files
 *.jks
 *.keystore
