@@ -73,7 +73,7 @@ android {
 }
 
 base {
-    archivesName = project.name + "-" + android.defaultConfig.versionName + "." + android.defaultConfig.versionCode
+    archivesName = "HyperOS4-FCM-Fix-" + android.defaultConfig.versionName
 }
 
 dependencies {
