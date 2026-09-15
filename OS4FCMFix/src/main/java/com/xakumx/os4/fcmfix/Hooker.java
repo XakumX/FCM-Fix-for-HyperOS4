@@ -12,6 +12,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -55,19 +56,30 @@ public class Hooker extends XposedModule {
     private static final String GMS_PACKAGE_NAME = "com.google.android.gms";
     private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
 
-    private PackageClassLoader param;
+    /** 热重载用:本次安装的 hook id 集合。 */
     private final Set<String> hookedIds = new HashSet<>();
 
     private record PackageClassLoader(String packageName, ClassLoader classLoader) {
     }
 
+    private PackageClassLoader param;
+
     // ---------------- 工具 ----------------
 
-    private void setHookId(XposedInterface.HookBuilder builder, String id) {
+    /**
+     * 安装 hook 并登记唯一 id(热重载时同 id 会被原子替换,避免重复挂载)。
+     * id 由 方法名 / 类简名+参数个数 派生,天然唯一。
+     */
+    private XposedInterface.HookBuilder hb(Executable exec) {
+        var builder = hook(exec);
         if (getApiVersion() >= 102) {
+            String id = exec instanceof Method m
+                    ? m.getName()
+                    : "ctor-" + exec.getDeclaringClass().getSimpleName() + "-" + exec.getParameterCount();
             builder.setId(id);
             hookedIds.add(id);
         }
+        return builder;
     }
 
     private void hookOk(String what) {
@@ -219,22 +231,14 @@ public class Hooker extends XposedModule {
     private void hookPackage(String packageName, ClassLoader classLoader) {
         if ("com.miui.powerkeeper".equals(packageName)) {
             try {
-                hookNetdExecutor(classLoader);
-            } catch (Throwable e) {
-                hookFail("NetdExecutor", e);
-            }
-            try {
-                hookGmsObserver(classLoader);
-            } catch (Throwable e) {
-                hookFail("GmsObserver", e);
-            }
-            try {
                 hookGlobalFeatureConfigureHelper(classLoader);
             } catch (Throwable e) {
                 hookFail("GlobalFeatureConfigureHelper", e);
             }
         }
     }
+
+    // ---------------- 热重载 ----------------
 
     @Override
     public boolean onHotReloading(@NonNull HotReloadingParam param) {
@@ -244,6 +248,7 @@ public class Hooker extends XposedModule {
 
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
+        hookedIds.clear();
         var isSystemServer = param.isSystemServer();
         if (param.getSavedInstanceState() instanceof PackageClassLoader(
                 String packageName, ClassLoader classLoader
@@ -258,6 +263,7 @@ public class Hooker extends XposedModule {
                 hookFail("Hot reload", tr);
             }
         }
+        // 旧句柄中未被本次安装登记的 hook 才取消(同 id 的已被原子替换)
         param.getOldHookHandles().forEach(h -> {
             if (!hookedIds.contains(h.getId())) {
                 h.unhook();
@@ -277,7 +283,7 @@ public class Hooker extends XposedModule {
 
         // 0) 构造器完成后关闭 GMS 限制总开关(字段 mGmsLimitEnabled 仍在,HyperOS 4 确认)
         for (Constructor<?> ctor : GreezeManagerServiceClass.getDeclaredConstructors()) {
-            Utils.evaluate(hook(ctor), h -> setHookId(h, "Greeze.<init>" + ctor.getParameterCount()))
+            hb(ctor)
                     .intercept(chain -> {
                         try {
                             return chain.proceed();
@@ -304,9 +310,28 @@ public class Hooker extends XposedModule {
         }
         final Method isAllowBroadcast = isAllowBroadcastMethod;
         if (isAllowBroadcast != null) {
-            Utils.evaluate(hook(isAllowBroadcast), h -> setHookId(h, isAllowBroadcast.getName()))
+            hb(isAllowBroadcast)
                     .intercept(chain -> {
                         List<Object> args = chain.getArgs();
+                        // 热路径:签名确认 5 参 (callerUid, callerPkgName, calleeUid, calleePkgName, action)
+                        if (args.size() >= 5 && chain.getArg(4) instanceof String action) {
+                            if (ACTION_REMOTE_INTENT.equals(action)) {
+                                if (GMS_PACKAGE_NAME.equals(chain.getArg(1))) {
+                                    return true;
+                                }
+                                Object callee = chain.getArg(3);
+                                if (GMS_PACKAGE_NAME.equals(callee) || GMS_PERSISTENT_PROCESS_NAME.equals(callee)) {
+                                    return true;
+                                }
+                            } else if (CN_DEFER_BROADCAST.contains(action)) {
+                                Object callee = chain.getArg(3);
+                                if (GMS_PACKAGE_NAME.equals(callee) || GMS_PERSISTENT_PROCESS_NAME.equals(callee)) {
+                                    return true;
+                                }
+                            }
+                            return chain.proceed();
+                        }
+                        // 弹性回退:签名变化时按参数内容判断
                         boolean callerGms = hasStringArg(args, GMS_PACKAGE_NAME);
                         boolean isRemote = hasStringArg(args, ACTION_REMOTE_INTENT);
                         if (callerGms && isRemote) {
@@ -334,7 +359,7 @@ public class Hooker extends XposedModule {
         }
         final Method deferBroadcastForMiui = deferBroadcastForMiuiMethod;
         if (deferBroadcastForMiui != null) {
-            Utils.evaluate(hook(deferBroadcastForMiui), h -> setHookId(h, deferBroadcastForMiui.getName()))
+            hb(deferBroadcastForMiui)
                     .intercept(chain -> {
                         if (hasAnyDeferAction(chain.getArgs())) {
                             return false;
@@ -354,7 +379,7 @@ public class Hooker extends XposedModule {
         }
         final Method updateGmsNetStatus = updateGmsNetStatusMethod;
         if (updateGmsNetStatus != null) {
-            Utils.evaluate(hook(updateGmsNetStatus), h -> setHookId(h, updateGmsNetStatus.getName()))
+            hb(updateGmsNetStatus)
                     .intercept(chain -> {
                         var args = chain.getArgs().toArray();
                         forceBooleanArgsFalse(args);
@@ -375,7 +400,7 @@ public class Hooker extends XposedModule {
         }
         final Method checkImmobulusModeRestrict = restrictMethod;
         if (checkImmobulusModeRestrict != null) {
-            Utils.evaluate(hook(checkImmobulusModeRestrict), h -> setHookId(h, checkImmobulusModeRestrict.getName()))
+            hb(checkImmobulusModeRestrict)
                     .intercept(chain -> {
                         for (Object a : chain.getArgs()) {
                             if (a instanceof String s
@@ -412,11 +437,14 @@ public class Hooker extends XposedModule {
             transferMethod = Utils.findMethodByName(AurogonImmobulusModeClass, "TransfermLocalAllowList");
         }
         final Method transferLocalAllowList = transferMethod;
+        // 预解析字段,回调内不再反射查找
+        final Field mAllowListField = findField(AurogonImmobulusModeClass, "mAllowList");
+        final Field mNoRestrictAppSetField = findField(AurogonImmobulusModeClass, "mNoRestrictAppSet");
 
         XposedInterface.Hooker ensureGmsAllowed = chain -> {
             try {
                 Object result = chain.proceed();
-                addGmsToAurogonExemption(chain.getThisObject(), AurogonImmobulusModeClass, transferLocalAllowList);
+                addGmsToAurogonExemption(chain.getThisObject(), mAllowListField, mNoRestrictAppSetField, transferLocalAllowList);
                 return result;
             } catch (Throwable t) {
                 throw t;
@@ -425,13 +453,13 @@ public class Hooker extends XposedModule {
 
         // 构造器完成后与云端白名单更新后都补加 GMS
         for (Constructor<?> ctor : AurogonImmobulusModeClass.getDeclaredConstructors()) {
-            Utils.evaluate(hook(ctor), h -> setHookId(h, "Aurogon.<init>" + ctor.getParameterCount()))
+            hb(ctor)
                     .intercept(ensureGmsAllowed);
             deoptimize(ctor);
         }
         Method updateCloudMethod = Utils.findMethodByName(AurogonImmobulusModeClass, "updateCloudAllowList");
         if (updateCloudMethod != null) {
-            Utils.evaluate(hook(updateCloudMethod), h -> setHookId(h, "updateCloudAllowList"))
+            hb(updateCloudMethod)
                     .intercept(ensureGmsAllowed);
             deoptimize(updateCloudMethod);
             hookOk("AurogonImmobulusMode.updateCloudAllowList");
@@ -439,11 +467,11 @@ public class Hooker extends XposedModule {
         // Settings(MILLET_NO_RESTRICT_APP)变化时会清空重建 mNoRestrictAppSet,补加钩子
         Method getNoRestrictMethod = Utils.findMethodByName(AurogonImmobulusModeClass, "getNoRestrictApps");
         if (getNoRestrictMethod != null) {
-            Utils.evaluate(hook(getNoRestrictMethod), h -> setHookId(h, "getNoRestrictApps"))
+            hb(getNoRestrictMethod)
                     .intercept(chain -> {
                         try {
                             Object result = chain.proceed();
-                            addGmsToAurogonExemption(chain.getThisObject(), AurogonImmobulusModeClass, transferLocalAllowList);
+                            addGmsToAurogonExemption(chain.getThisObject(), mAllowListField, mNoRestrictAppSetField, transferLocalAllowList);
                             return result;
                         } catch (Throwable t) {
                             throw t;
@@ -452,32 +480,16 @@ public class Hooker extends XposedModule {
             deoptimize(getNoRestrictMethod);
             hookOk("AurogonImmobulusMode.getNoRestrictApps");
         }
-
-        // 阻止任何路径移除 GMS 白名单
-        Method removeMethod = Utils.findMethod(AurogonImmobulusModeClass, 1, "removeAurogonAllowList");
-        if (removeMethod == null) {
-            removeMethod = Utils.findMethodByName(AurogonImmobulusModeClass, "removeAurogonAllowList");
-        }
-        final Method removeAurogonAllowList = removeMethod;
-        if (removeAurogonAllowList != null) {
-            Utils.evaluate(hook(removeAurogonAllowList), h -> setHookId(h, "removeAurogonAllowList"))
-                    .intercept(chain -> {
-                        if (GMS_PACKAGE_NAME.equals(chain.getArg(0))) {
-                            return null;
-                        }
-                        return chain.proceed();
-                    });
-            deoptimize(removeAurogonAllowList);
-            hookOk("AurogonImmobulusMode.removeAurogonAllowList");
-        }
+        // removeAurogonAllowList 的唯一调用源(lambda$updateGmsNetStatus$3)已被
+        // updateGmsNetStatus 强制 false 封堵,不再需要拦截(已移除)。
     }
 
     /** 把 GMS 补加进 Aurogon 白名单(mAllowList)与 QuickFreeze 豁免集合(mNoRestrictAppSet)。 */
-    private void addGmsToAurogonExemption(Object target, Class<?> immobulusClass, Method transferLocalAllowList) {
+    private void addGmsToAurogonExemption(Object target, Field mAllowListField, Field mNoRestrictAppSetField,
+                                          Method transferLocalAllowList) {
         try {
-            Field f = findField(immobulusClass, "mAllowList");
-            if (f != null && f.get(target) instanceof List<?> allowList
-                    && allowList.stream().allMatch(x -> x instanceof String)) {
+            if (mAllowListField != null && mAllowListField.get(target) instanceof List<?> allowList
+                    && (allowList.isEmpty() || allowList.get(0) instanceof String)) {
                 boolean added = false;
                 if (!allowList.contains(GMS_PACKAGE_NAME)) {
                     ((List<String>) allowList).add(GMS_PACKAGE_NAME);
@@ -497,9 +509,8 @@ public class Hooker extends XposedModule {
             hookFail("AurogonImmobulusMode.mAllowList", e);
         }
         try {
-            Field nr = findField(immobulusClass, "mNoRestrictAppSet");
-            if (nr != null && nr.get(target) instanceof Set<?> noRestrict
-                    && noRestrict.stream().allMatch(x -> x instanceof String)) {
+            if (mNoRestrictAppSetField != null && mNoRestrictAppSetField.get(target) instanceof Set<?> noRestrict
+                    && (noRestrict.isEmpty() || noRestrict.iterator().next() instanceof String)) {
                 if (!noRestrict.contains(GMS_PACKAGE_NAME)) {
                     ((Set<String>) noRestrict).add(GMS_PACKAGE_NAME);
                     hookOk("AurogonImmobulusMode.mNoRestrictAppSet + GMS");
@@ -525,7 +536,7 @@ public class Hooker extends XposedModule {
         }
         final Method deferBroadcast = deferBroadcastMethod;
         if (deferBroadcast != null) {
-            Utils.evaluate(hook(deferBroadcast), h -> setHookId(h, deferBroadcast.getName()))
+            hb(deferBroadcast)
                     .intercept(chain -> false);
             deoptimize(deferBroadcast);
             hookOk("DomesticPolicyManager." + deferBroadcast.getName());
@@ -548,7 +559,7 @@ public class Hooker extends XposedModule {
         final Field useDataWhiteListField = findField(ListAppsManagerClass,
                 "USE_DATA_WHITE_LIST", "mUseDataWhiteList");
         for (Constructor<?> ctor : ListAppsManagerClass.getDeclaredConstructors()) {
-            Utils.evaluate(hook(ctor), h -> setHookId(h, "ListApps.<init>" + ctor.getParameterCount()))
+            hb(ctor)
                     .intercept(chain -> {
                         try {
                             return chain.proceed();
@@ -585,7 +596,7 @@ public class Hooker extends XposedModule {
         }
         final Method isInWhiteList = isInWhiteListMethod;
         if (isInWhiteList != null) {
-            Utils.evaluate(hook(isInWhiteList), h -> setHookId(h, isInWhiteList.getName()))
+            hb(isInWhiteList)
                     .intercept(chain -> {
                         if (GMS_PACKAGE_NAME.equals(chain.getArg(0))) {
                             return true;
@@ -610,7 +621,7 @@ public class Hooker extends XposedModule {
         final Field noNetworkField = findField(AwareResourceControlClass,
                 "mNoNetworkBlackUids", "mNoNetworkBlackList");
         for (Constructor<?> ctor : AwareResourceControlClass.getDeclaredConstructors()) {
-            Utils.evaluate(hook(ctor), h -> setHookId(h, "Aware.<init>" + ctor.getParameterCount()))
+            hb(ctor)
                     .intercept(chain -> {
                         try {
                             return chain.proceed();
@@ -649,7 +660,7 @@ public class Hooker extends XposedModule {
             Method m = Utils.findMethodByName(c, "checkApplicationAutoStart");
             if (m == null) continue;
             checkedClass = c;
-            Utils.evaluate(hook(m), h -> setHookId(h, "autoStart-" + c.getSimpleName()))
+            hb(m)
                     .intercept(chain -> {
                         if (hasGmsC2dmRecordArg(chain.getArgs())) {
                             return true;
@@ -674,7 +685,7 @@ public class Hooker extends XposedModule {
             if (m == null) m = Utils.findMethod(AutoStartClass, 4, "isAllowStartService");
             if (m == null) m = Utils.findMethodByName(AutoStartClass, "isAllowStartService");
             if (m != null) {
-                Utils.evaluate(hook(m), h -> setHookId(h, "isAllowStartService"))
+                hb(m)
                         .intercept(chain -> {
                             if (hasFcmIntentArg(chain.getArgs())) {
                                 return true;
@@ -686,38 +697,9 @@ public class Hooker extends XposedModule {
             }
         }
 
-        var SmartPowerClass = Utils.findClass(classLoader, "com.android.server.am.SmartPowerService");
-        if (SmartPowerClass != null) {
-            Method m = Utils.findMethodByName(SmartPowerClass, "shouldInterceptBroadcast");
-            if (m != null) {
-                Utils.evaluate(hook(m), h -> setHookId(h, "shouldInterceptBroadcast"))
-                        .intercept(chain -> {
-                            if (hasGmsC2dmRecordArg(chain.getArgs())) {
-                                return false;
-                            }
-                            return chain.proceed();
-                        });
-                deoptimize(m);
-                hookOk("SmartPowerService." + m.getName());
-            }
-        }
-
-        var SmartPowerPolicyClass = Utils.findClass(classLoader,
-                "com.miui.server.smartpower.SmartPowerPolicyManager");
-        if (SmartPowerPolicyClass != null) {
-            Method m = Utils.findMethodByName(SmartPowerPolicyClass, "shouldInterceptService");
-            if (m != null) {
-                Utils.evaluate(hook(m), h -> setHookId(h, "shouldInterceptService"))
-                        .intercept(chain -> {
-                            if (hasFcmIntentArg(chain.getArgs())) {
-                                return false;
-                            }
-                            return chain.proceed();
-                        });
-                deoptimize(m);
-                hookOk("SmartPowerPolicyManager." + m.getName());
-            }
-        }
+        // SmartPowerService.shouldInterceptBroadcast 与
+        // SmartPowerPolicyManager.shouldInterceptService 在 HyperOS 4 已不存在
+        // (反编译确认),相关 hook 已移除。
     }
 
     private void hookProcessPolicy(ClassLoader classLoader) {
@@ -728,7 +710,7 @@ public class Hooker extends XposedModule {
         }
         Method getWhiteListMethod = Utils.findMethodByName(ProcessPolicyClass, "getWhiteList");
         if (getWhiteListMethod != null) {
-            Utils.evaluate(hook(getWhiteListMethod), h -> setHookId(h, getWhiteListMethod.getName()))
+            hb(getWhiteListMethod)
                     .intercept(chain -> {
                         var result = chain.proceed();
                         int flags = 0;
@@ -804,7 +786,7 @@ public class Hooker extends XposedModule {
         }
         final Method getRecord = getRecordMethod;
 
-        Utils.evaluate(hook(broadcastMethod), h -> setHookId(h, broadcastMethod.getName()))
+        hb(broadcastMethod)
                 .intercept(chain -> {
                     if (chain.getArg(intentArgIndex) instanceof Intent intent) {
                         if (ACTION_REMOTE_INTENT.equals(intent.getAction()) && getRecord != null) {
@@ -845,62 +827,11 @@ public class Hooker extends XposedModule {
 
     // ---------------- powerkeeper:NetdExecutor ----------------
 
-    private void hookNetdExecutor(ClassLoader classLoader) {
-        var NetdExecutorClass = Utils.findClass(classLoader, "com.miui.powerkeeper.utils.NetdExecutor");
-        if (NetdExecutorClass == null) {
-            hookFail("NetdExecutor class", new ClassNotFoundException("class not found"));
-            return;
-        }
-        // HyperOS 4:initGmsChain 已删除,改为 setGmsDnsBlockerState(int, boolean)
-        // boolean=true 时执行 dnsproxyd setuiddnsrule <uid> deny → 强制为 false(allow)
-        Method setGmsDnsBlockerStateMethod = Utils.findMethod(NetdExecutorClass, 2, "setGmsDnsBlockerState");
-        if (setGmsDnsBlockerStateMethod == null) {
-            setGmsDnsBlockerStateMethod = Utils.findMethodByName(NetdExecutorClass, "setGmsDnsBlockerState");
-        }
-        final Method setGmsDnsBlockerState = setGmsDnsBlockerStateMethod;
-        if (setGmsDnsBlockerState != null) {
-            Utils.evaluate(hook(setGmsDnsBlockerState), h -> setHookId(h, setGmsDnsBlockerState.getName()))
-                    .intercept(chain -> {
-                        var args = chain.getArgs().toArray();
-                        forceBooleanArgsFalse(args);
-                        return chain.proceed(args);
-                    });
-            deoptimize(setGmsDnsBlockerState);
-            hookOk("NetdExecutor." + setGmsDnsBlockerState.getName());
-        } else {
-            hookFail("NetdExecutor.setGmsDnsBlockerState", new NoSuchMethodException("setGmsDnsBlockerState"));
-        }
-    }
-
-    // ---------------- powerkeeper:GmsObserver ----------------
-
-    private void hookGmsObserver(ClassLoader classLoader) {
-        var GmsObserverClass = Utils.findClass(classLoader, "com.miui.powerkeeper.utils.GmsObserver");
-        if (GmsObserverClass == null) {
-            hookFail("GmsObserver class", new ClassNotFoundException("class not found"));
-            return;
-        }
-        // HyperOS 4:updateGmsAlarm 等已删除;Google 不可达时经
-        // updateFrameworkGmsNetStatus(true) 通知 greezer 限制 GMS → 强制不限制
-        Method updateFrameworkMethod = Utils.findMethod(GmsObserverClass, 1, "updateFrameworkGmsNetStatus");
-        if (updateFrameworkMethod == null) {
-            updateFrameworkMethod = Utils.findMethodByName(GmsObserverClass, "updateFrameworkGmsNetStatus");
-        }
-        final Method updateFrameworkGmsNetStatus = updateFrameworkMethod;
-        if (updateFrameworkGmsNetStatus != null) {
-            Utils.evaluate(hook(updateFrameworkGmsNetStatus), h -> setHookId(h, updateFrameworkGmsNetStatus.getName()))
-                    .intercept(chain -> {
-                        var args = chain.getArgs().toArray();
-                        forceBooleanArgsFalse(args);
-                        return chain.proceed(args);
-                    });
-            deoptimize(updateFrameworkGmsNetStatus);
-            hookOk("GmsObserver." + updateFrameworkGmsNetStatus.getName());
-        } else {
-            hookFail("GmsObserver.updateFrameworkGmsNetStatus",
-                    new NoSuchMethodException("updateFrameworkGmsNetStatus"));
-        }
-    }
+    // powerkeeper 精简说明:
+    // - NetdExecutor.setGmsDnsBlockerState(gms_wall/DNS 网络控制器)与
+    //   GmsObserver.updateFrameworkGmsNetStatus(通知 greezer)已移除:
+    //   前者经 dingwen07 调查证明非断连根因;后者下游 updateGmsNetStatus 已封堵。
+    // - 保留 GlobalFeatureConfigureHelper.getDozeWhiteListApps 作为 Doze 防御。
 
     // ---------------- powerkeeper:GlobalFeatureConfigureHelper ----------------
 
@@ -914,7 +845,7 @@ public class Hooker extends XposedModule {
         Method getDozeWhiteListAppsMethod = Utils.findMethodByName(GlobalFeatureConfigureHelperClass,
                 "getDozeWhiteListApps");
         if (getDozeWhiteListAppsMethod != null) {
-            Utils.evaluate(hook(getDozeWhiteListAppsMethod), h -> setHookId(h, getDozeWhiteListAppsMethod.getName()))
+            hb(getDozeWhiteListAppsMethod)
                     .intercept(chain -> {
                         var result = chain.proceed();
                         if (result instanceof List<?>) {

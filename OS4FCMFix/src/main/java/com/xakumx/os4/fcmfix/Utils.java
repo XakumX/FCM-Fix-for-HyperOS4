@@ -4,19 +4,12 @@ import android.content.Intent;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.function.Consumer;
 
 /**
  * 反射工具集:针对 HyperOS 4 / Android 17 上类名与方法签名不稳定的情况,
  * 提供候选类名查找与弹性方法匹配能力。
  */
 public class Utils {
-
-    /** 链式调用辅助:对 target 执行 action 后原样返回 target。 */
-    public static <T> T evaluate(T target, Consumer<T> action) {
-        action.accept(target);
-        return target;
-    }
 
     /** 依次尝试候选类名,返回第一个能加载的类;全部失败返回 null。 */
     public static Class<?> findClass(ClassLoader cl, String... candidates) {
