@@ -1,4 +1,4 @@
-# FCM-Fix-for-HyperOS4
+# FCM Fix for HyperOS4
 
 移植自 [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live),
 已在 Redmi K90 Ultra(HyperOS 4.0.0.9.XHPCNXM.D01, Android 17)实测通过:
@@ -41,3 +41,4 @@ powerkeeper: GmsObserver 检测 Google 不可达
 
 - [Howard20181/HyperOS_FCM_Live](https://github.com/Howard20181/HyperOS_FCM_Live)：原始模块
 - [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)：Agent
+- [dingwen07/hyperos-fcm-fix](https://github.com/dingwen07/hyperos-fcm-fix)
