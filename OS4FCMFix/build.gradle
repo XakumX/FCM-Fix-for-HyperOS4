@@ -10,7 +10,7 @@ android {
         minSdkVersion 27
         targetSdkVersion 37
         versionCode 110
-        versionName "1.1.0-alpha1"
+        versionName "1.1.0"
     }
 
     Properties localProperties = new Properties()
