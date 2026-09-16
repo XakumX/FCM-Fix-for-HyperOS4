@@ -50,6 +50,15 @@ public class Utils {
         return null;
     }
 
+    /**
+     * 先按"方法名 + 参数个数"精确查找,失败再按方法名模糊查找。
+     * 用于消除调用处"精确查找 + 回退"的重复样板(签名变化时仍能命中)。
+     */
+    public static Method findMethodLoose(Class<?> c, int paramCount, String... names) {
+        Method m = findMethod(c, paramCount, names);
+        return m != null ? m : findMethodByName(c, names);
+    }
+
     /** 在重载中找参数个数最多的版本(用于 broadcastIntentWithFeature 等持续加参的方法)。 */
     public static Method findMethodWithMaxParams(Class<?> c, String... names) {
         Method best = null;
@@ -89,6 +98,21 @@ public class Utils {
             if (types[i] == Intent.class) return i;
         }
         return -1;
+    }
+
+    /** 沿类层级向上查找字段(不取值),字段名按候选顺序尝试;失败返回 null。 */
+    public static Field findField(Class<?> c, String... names) {
+        for (Class<?> cur = c; cur != null; cur = cur.getSuperclass()) {
+            for (String name : names) {
+                try {
+                    Field f = cur.getDeclaredField(name);
+                    f.setAccessible(true);
+                    return f;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
     }
 
     /** 沿类层级向上查找字段值,字段名按候选顺序尝试;失败返回 null。 */

@@ -9,8 +9,8 @@ android {
         applicationId namespace
         minSdkVersion 27
         targetSdkVersion 37
-        versionCode 110
-        versionName "1.1.0"
+        versionCode 111
+        versionName "1.1.1"
     }
 
     Properties localProperties = new Properties()
