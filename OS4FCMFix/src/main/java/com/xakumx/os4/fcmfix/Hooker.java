@@ -34,8 +34,9 @@ import io.github.libxposed.api.XposedModule;
  *   <li><b>QuickFreeze 豁免</b>:三时机(constructor / updateCloudAllowList /
  *       getNoRestrictApps)把 GMS 补进 {@code mAllowList} 与 {@code mNoRestrictAppSet},
  *       并调用 {@code TransfermLocalAllowList} 同步 native;</li>
- *   <li><b>GMS 网络</b>:强制 {@code NetdExecutor.setGmsDnsBlockerState} 为 allow,
- *       避免待机/网络切换时 dnsproxyd 对 GMS 下发 DNS deny 导致的心跳断连;</li>
+ *   <li><b>待机断网豁免</b>:拦截 {@code AppStandbyController.updateRuleForUidLocked}
+ *       与 {@code DeviceIdlePolicyHelper.r} 对 GMS 的下发,避免熄屏待机时 GMS 被
+ *       标记 inactive 而断网(表现为 err:3 连接被拒、断开数小时);</li>
  *   <li><b>广播投递</b>:{@code isAllowBroadcast}/{@code deferBroadcastForMiui} 放行
  *       c2dm 与 4 个重连广播;{@code checkImmobulusModeRestrict} 让 FCM 广播在
  *       LaunchMode 下也解冻目标应用;</li>
@@ -256,9 +257,9 @@ public class Hooker extends XposedModule {
     private void hookPackage(String packageName, ClassLoader classLoader) {
         if ("com.miui.powerkeeper".equals(packageName)) {
             try {
-                hookNetdExecutor(classLoader);
+                hookStandbyNetworkExemption(classLoader);
             } catch (Throwable e) {
-                hookFail("NetdExecutor", e);
+                hookFail("StandbyNetworkExemption", e);
             }
             try {
                 hookGlobalFeatureConfigureHelper(classLoader);
@@ -848,32 +849,76 @@ public class Hooker extends XposedModule {
                 + " (" + broadcastMethod.getParameterCount() + " params, intent@" + intentArgIndex + ")");
     }
 
-    // ---------------- powerkeeper:NetdExecutor ----------------
+    // ---------------- powerkeeper:待机断网豁免 ----------------
+
+    /** GMS 的 uid(懒解析并缓存,供待机断网豁免判断使用)。 */
+    private static volatile int sGmsUid = -1;
+
+    private static int resolveGmsUid(Object holder) {
+        if (sGmsUid > 0) return sGmsUid;
+        Object ctx = Utils.getFieldOrNull(holder, "mContext", "f232c");
+        if (ctx instanceof Context c) {
+            try {
+                sGmsUid = c.getPackageManager().getApplicationInfo(GMS_PACKAGE_NAME, 0).uid;
+            } catch (Throwable ignored) {
+            }
+        }
+        return sGmsUid;
+    }
 
     /**
-     * setGmsDnsBlockerState(int uid, boolean block):powerkeeper 在待机 / Google 网络
-     * 不可达时会对 GMS uid 下发 dnsproxyd 的 {@code setuiddnsrule <uid> deny},
-     * 使 GMS 域名解析失败 → 心跳断开 → 网络恢复后重连 → 再次被 deny(频繁断连)。
-     * 此处把 block 强制为 false(allow),保证 GMS 的 DNS 永不被系统切断。
+     * 待机断网豁免 —— 深夜深度待机时 FCM 长时间断连(err:3 连接被拒、断开数小时)的根因链:
+     * <pre>
+     * 熄屏待机 → AppStandbyController.updateRuleForUidLocked(uid, rule=1)
+     *   → setUidState(uid, allow=false)
+     *     → DeviceIdlePolicyHelper.r(uid, disallow=true)
+     *       → DeviceIdleController.setAppInactive(pkg, true) → 应用被断网
+     * </pre>
+     * 让 GMS 在规则层与下发层都豁免,保证待机期间仍能维持推送连接。
      */
-    private void hookNetdExecutor(ClassLoader classLoader) {
-        var NetdExecutorClass = Utils.findClass(classLoader, "com.miui.powerkeeper.utils.NetdExecutor");
-        if (NetdExecutorClass == null) {
-            hookFail("NetdExecutor class", new ClassNotFoundException("class not found"));
-            return;
+    private void hookStandbyNetworkExemption(ClassLoader classLoader) {
+        // 1) 规则层:rule == 1 表示待机断网(setUidState(uid, rule != 1))
+        var StandbyClass = Utils.findClass(classLoader,
+                "com.miui.powerkeeper.controller.AppStandbyController");
+        if (StandbyClass != null) {
+            final Method updateRule = Utils.findMethodLoose(StandbyClass, 2, "updateRuleForUidLocked");
+            if (updateRule != null) {
+                hb(updateRule)
+                        .intercept(chain -> {
+                            int uid = chain.getArg(0) instanceof Integer i ? i : -1;
+                            if (uid > 0 && uid == resolveGmsUid(chain.getThisObject())
+                                    && chain.getArg(1) instanceof Integer rule && rule == 1) {
+                                hookOk("StandbyRule: GMS 待机断网规则被豁免 (uid=" + uid + ")");
+                                return chain.proceed(new Object[]{uid, 0});
+                            }
+                            return chain.proceed();
+                        });
+                deoptimize(updateRule);
+                hookOk("AppStandbyController." + updateRule.getName());
+            } else {
+                hookFail("AppStandbyController.updateRuleForUidLocked",
+                        new NoSuchMethodException("updateRuleForUidLocked"));
+            }
         }
-        final Method setGmsDnsBlockerState = Utils.findMethodLoose(NetdExecutorClass, 2, "setGmsDnsBlockerState");
-        if (setGmsDnsBlockerState != null) {
-            hb(setGmsDnsBlockerState)
-                    .intercept(chain -> {
-                        var args = chain.getArgs().toArray();
-                        forceBooleanArgsFalse(args);
-                        return chain.proceed(args);
-                    });
-            deoptimize(setGmsDnsBlockerState);
-            hookOk("NetdExecutor." + setGmsDnsBlockerState.getName());
-        } else {
-            hookFail("NetdExecutor.setGmsDnsBlockerState", new NoSuchMethodException("setGmsDnsBlockerState"));
+
+        // 2) 下发层:DeviceIdlePolicyHelper.r(uid, disallow)
+        var HelperClass = Utils.findClass(classLoader, "com.miui.powerkeeper.DeviceIdlePolicyHelper");
+        if (HelperClass != null) {
+            final Method disallowMethod = Utils.findMethod(HelperClass, 2, "r");
+            if (disallowMethod != null) {
+                hb(disallowMethod)
+                        .intercept(chain -> {
+                            int uid = chain.getArg(0) instanceof Integer i ? i : -1;
+                            if (uid > 0 && chain.getArg(1) instanceof Boolean disallow && disallow
+                                    && uid == resolveGmsUid(chain.getThisObject())) {
+                                hookOk("StandbyNet: GMS 断网下发被豁免 (uid=" + uid + ")");
+                                return chain.proceed(new Object[]{uid, Boolean.FALSE});
+                            }
+                            return chain.proceed();
+                        });
+                deoptimize(disallowMethod);
+                hookOk("DeviceIdlePolicyHelper." + disallowMethod.getName());
+            }
         }
     }
 
